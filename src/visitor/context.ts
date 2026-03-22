@@ -6,6 +6,9 @@ export interface TranspilerContext {
 	sourceFile: ts.SourceFile;
 	checker: ts.TypeChecker;
 	importedModules: Set<string>;
+	unsupportedModules: Set<string>;
+	externalModuleSources: Map<string, string>;
+	diagnostics: string[];
 	typeAliases: Map<string, string>;
 	importAliases: string[];
 	globalNames: Set<string>;

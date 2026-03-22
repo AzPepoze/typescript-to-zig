@@ -11,6 +11,9 @@ export function runTranspiler(testDir: string, outDir: string) {
 		fs.mkdirSync(outDir);
 	}
 
+	const externalModuleSources = new Map<string, string>();
+	const transpiledExternalModules = new Set<string>();
+
 	const files = fs.readdirSync(testDir).filter(f => f.endsWith(".ts") && !f.endsWith(".test.ts") && f !== "tsconfig.json");
 	logger.info(`Found ${files.length} files in ${testDir}: ${files.join(", ")}`);
 
@@ -33,6 +36,9 @@ export function runTranspiler(testDir: string, outDir: string) {
 			sourceFile,
 			checker,
 			importedModules: new Set(),
+			unsupportedModules: new Set(),
+			externalModuleSources: new Map<string, string>(),
+			diagnostics: [],
 			typeAliases: new Map(),
 			importAliases: [],
 			globalNames: new Set(),
@@ -82,12 +88,130 @@ pub fn main() void {
 
 		const outPath = path.join(outDir, `${baseName}.zig`);
 		fs.writeFileSync(outPath, context.zigOutput);
+		for (const [zigModule, sourcePath] of context.externalModuleSources.entries()) {
+			externalModuleSources.set(zigModule, sourcePath);
+		}
+		for (const diagnostic of context.diagnostics) {
+			logger.warn(`${file}: ${diagnostic}`);
+		}
 		try {
 			require("child_process").execSync(`zig fmt ${outPath}`, { stdio: "ignore" });
 		} catch (e) {
 			logger.warn(`Failed to format ${outPath}`);
 		}
 		logger.info(`Transpiled ${file} -> out/${baseName}.zig`);
+	}
+
+	transpileExternalModules(outDir, externalModuleSources, transpiledExternalModules);
+}
+
+function transpileExternalModules(
+	outDir: string,
+	externalModuleSources: Map<string, string>,
+	transpiledExternalModules: Set<string>
+) {
+	let pending = true;
+	while (pending) {
+		pending = false;
+		for (const [zigModule, sourcePath] of externalModuleSources.entries()) {
+			if (transpiledExternalModules.has(zigModule)) continue;
+
+			const sourceProgram = ts.createProgram([sourcePath], {
+				strict: true,
+				target: ts.ScriptTarget.ESNext,
+				module: ts.ModuleKind.ESNext,
+				allowJs: true,
+				checkJs: false,
+			});
+			const sourceFile = sourceProgram.getSourceFile(sourcePath);
+			if (!sourceFile) {
+				logger.warn(`Failed to load external module source: ${sourcePath}`);
+				transpiledExternalModules.add(zigModule);
+				continue;
+			}
+
+			const checker = sourceProgram.getTypeChecker();
+			const context: TranspilerContext = {
+				zigOutput: createDefaultZigPrelude(path.basename(sourcePath), { includeMapHelper: fileNeedsMapHelper(sourceFile) }),
+				mainBody: "",
+				sourceFile,
+				checker,
+				importedModules: new Set(),
+				unsupportedModules: new Set(),
+				externalModuleSources: new Map<string, string>(),
+				diagnostics: [],
+				typeAliases: new Map(),
+				importAliases: [],
+				globalNames: new Set(),
+				identifierScopes: [new Map()],
+			};
+
+			sourceFile.statements.forEach(stmt => {
+				if (!ts.isVariableStatement(stmt)) return;
+				stmt.declarationList.declarations.forEach(decl => {
+					if (ts.isIdentifier(decl.name)) {
+						context.globalNames.add(decl.name.text);
+					}
+				});
+			});
+
+			sourceFile.statements.forEach(stmt => {
+				if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+					context.globalNames.add(stmt.name.text);
+				}
+				if (ts.isClassDeclaration(stmt)) {
+					stmt.members.forEach(member => {
+						if ((ts.isMethodDeclaration(member) || ts.isPropertyDeclaration(member)) && member.name && ts.isIdentifier(member.name)) {
+							context.globalNames.add(member.name.text);
+						}
+					});
+				}
+			});
+
+			const visit = createVisitor(context);
+			ts.forEachChild(sourceFile, visit);
+
+			const initCalls = context.importAliases.map(alias => `    if (@hasDecl(${alias}, "_init")) ${alias}._init();`).join("\n");
+			const initBody = context.mainBody;
+
+			context.zigOutput += `
+pub var _is_initialized = false;
+pub fn _init() void {
+    if (_is_initialized) return;
+    _is_initialized = true;
+${initCalls}
+${initBody}}
+
+pub fn main() void {
+    _init();
+}
+`;
+
+			const outPath = path.join(outDir, zigModule);
+			const outDirPath = path.dirname(outPath);
+			if (!fs.existsSync(outDirPath)) {
+				fs.mkdirSync(outDirPath, { recursive: true });
+			}
+			fs.writeFileSync(outPath, context.zigOutput);
+			try {
+				require("child_process").execSync(`zig fmt ${outPath}`, { stdio: "ignore" });
+			} catch {
+				logger.warn(`Failed to format ${outPath}`);
+			}
+
+			for (const [nextZigModule, nextSourcePath] of context.externalModuleSources.entries()) {
+				if (!externalModuleSources.has(nextZigModule)) {
+					externalModuleSources.set(nextZigModule, nextSourcePath);
+					pending = true;
+				}
+			}
+			for (const diagnostic of context.diagnostics) {
+				logger.warn(`${sourcePath}: ${diagnostic}`);
+			}
+
+			transpiledExternalModules.add(zigModule);
+			logger.info(`Transpiled external module ${sourcePath} -> ${zigModule}`);
+		}
 	}
 }
 

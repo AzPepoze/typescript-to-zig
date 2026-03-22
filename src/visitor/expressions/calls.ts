@@ -4,6 +4,7 @@ import { translateExpression } from "./core";
 import { handleMathCall, handleParseIntCall } from "../mappings/builtin_calls";
 import { mapType } from "../../types";
 import { isExpressionOriginallyOptional, isRecursiveClassDeclaration, isRecursiveClassType } from "../utils";
+import { resolveAndRegisterModuleImport } from "../declarations/imports";
 
 const MUTATING_METHODS = new Set(["set", "push", "add", "insert", "delete"]);
 
@@ -21,6 +22,19 @@ function isNumberLikeType(typeStr: string): boolean {
 
 export function translateCallExpression(node: ts.CallExpression, context: TranspilerContext): string {
 	const { checker } = context;
+	if (ts.isIdentifier(node.expression) && node.expression.text === "require") {
+		if (node.arguments.length !== 1 || !ts.isStringLiteral(node.arguments[0])) {
+			context.diagnostics.push("Dynamic require() is unsupported for native Zig runtime");
+			return `@compileError("Dynamic require() is unsupported for native Zig runtime")`;
+		}
+		const moduleSpec = node.arguments[0].text;
+		const resolved = resolveAndRegisterModuleImport(moduleSpec, context);
+		if (resolved.unsupported) {
+			return `@compileError("Unsupported module specifier: ${moduleSpec.replace(/\\/g, "\\\\").replace(/\"/g, '\\\"')}")`;
+		}
+		return resolved.moduleAlias;
+	}
+
 	let func = translateExpression(node.expression, context);
 	let args = node.arguments.map(arg => translateExpression(arg, context));
 
