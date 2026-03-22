@@ -48,6 +48,6 @@ const arr = [
 sorter.sort(arr);
 
 console.log("Sorter Test");
-console.log("First: " + arr[0].value);
-console.log("Last: " + arr[4].value);
+console.log("First: " + arr[0].getValue());
+console.log("Last: " + arr[4].getValue());
 console.log("Sorter Test Complete");

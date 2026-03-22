@@ -5,6 +5,7 @@ import { translateBinaryExpression } from "./binary";
 import { translateCallExpression, translateNewExpression } from "./calls";
 import { translateArrowFunctionExpression } from "./functions";
 import { mapType } from "../../types";
+import { isExpressionOriginallyOptional } from "../utils";
 
 export function translateExpression(node: ts.Node, context: TranspilerContext): string {
 	const { sourceFile, checker } = context;
@@ -51,8 +52,11 @@ export function translateExpression(node: ts.Node, context: TranspilerContext): 
 	}
 
 	if (ts.isPropertyAccessExpression(node)) {
-		const object = translateExpression(node.expression, context);
+		let object = translateExpression(node.expression, context);
 		const propertyName = node.name.text;
+		if (isExpressionOriginallyOptional(node.expression, checker)) {
+			object = `${object}.?`;
+		}
 		if (object === "this") return `self.${propertyName}`;
 		if (propertyName === "length") return `@as(f64, @floatFromInt(${object}.len))`;
 		return `${object}.${propertyName}`;

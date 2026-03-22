@@ -4,6 +4,7 @@ import * as path from "path";
 import { createVisitor } from "./visitor/index";
 import { TranspilerContext } from "./visitor/context";
 import { logger } from "./utils/logger";
+import { createDefaultZigPrelude } from "./constants";
 
 export function runTranspiler(testDir: string, outDir: string) {
 	if (!fs.existsSync(outDir)) {
@@ -25,9 +26,9 @@ export function runTranspiler(testDir: string, outDir: string) {
 		if (!sourceFile) continue;
 
 		const baseName = path.basename(file, ".ts");
+		const needsMapHelper = fileNeedsMapHelper(sourceFile);
 		const context: TranspilerContext = {
-			zigOutput: `// Generated from ${file}\nconst std = @import("std");\n\nfn __mapKeyEquals(comptime K: type, a: K, b: K) bool {\n    const info = @typeInfo(K);\n    if (info == .pointer and info.pointer.size == .slice and info.pointer.child == u8) {\n        return std.mem.eql(u8, a, b);\n    }\n    return a == b;\n}\n\nfn Map(comptime K: type, comptime V: type) type {\n    return struct {\n        keys: [1024]K = undefined,\n        vals: [1024]V = undefined,\n        len: usize = 0,\n\n        pub fn has(self: *const @This(), key: K) bool {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) return true;\n            }\n            return false;\n        }\n\n        pub fn get(self: *const @This(), key: K) ?V {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) return self.vals[i];\n            }\n            return null;\n        }\n\n        pub fn set(self: *@This(), key: K, value: V) bool {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) {\n                    self.vals[i] = value;\n                    return true;\n                }\n            }\n            if (self.len >= self.keys.len) return false;\n            self.keys[self.len] = key;\n            self.vals[self.len] = value;\n            self.len += 1;\n            return true;\n        }\n\n        pub fn values(self: *const @This()) []const V {\n            return self.vals[0..self.len];\n        }\n    };\n}\n\n`,
-			zigOutput: `// Generated from ${file}\nconst std = @import("std");\n\nfn __mapKeyEquals(comptime K: type, a: K, b: K) bool {\n    const info = @typeInfo(K);\n    if (info == .pointer and info.pointer.size == .slice and info.pointer.child == u8) {\n        return std.mem.eql(u8, a, b);\n    }\n    return a == b;\n}\n\nfn __slicePush(comptime T: type, src: []T, value: T) []T {\n    const out = std.heap.page_allocator.alloc(T, src.len + 1) catch return src;\n    std.mem.copyForwards(T, out[0..src.len], src);\n    out[src.len] = value;\n    return out;\n}\n\nfn Map(comptime K: type, comptime V: type) type {\n    return struct {\n        keys: [1024]K = undefined,\n        vals: [1024]V = undefined,\n        len: usize = 0,\n\n        pub fn has(self: *const @This(), key: K) bool {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) return true;\n            }\n            return false;\n        }\n\n        pub fn get(self: *const @This(), key: K) ?V {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) return self.vals[i];\n            }\n            return null;\n        }\n\n        pub fn set(self: *@This(), key: K, value: V) bool {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) {\n                    self.vals[i] = value;\n                    return true;\n                }\n            }\n            if (self.len >= self.keys.len) return false;\n            self.keys[self.len] = key;\n            self.vals[self.len] = value;\n            self.len += 1;\n            return true;\n        }\n\n        pub fn values(self: *const @This()) []const V {\n            return self.vals[0..self.len];\n        }\n    };\n}\n\n`,
+			zigOutput: createDefaultZigPrelude(file, { includeMapHelper: needsMapHelper }),
 			mainBody: "",
 			sourceFile,
 			checker,
@@ -88,4 +89,23 @@ pub fn main() void {
 		}
 		logger.info(`Transpiled ${file} -> out/${baseName}.zig`);
 	}
+}
+
+function fileNeedsMapHelper(sourceFile: ts.SourceFile): boolean {
+	let needsMap = false;
+	const visit = (node: ts.Node) => {
+		if (needsMap) return;
+		if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && node.typeName.text === "Map") {
+			needsMap = true;
+			return;
+		}
+		if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Map") {
+			needsMap = true;
+			return;
+		}
+		ts.forEachChild(node, visit);
+	};
+
+	visit(sourceFile);
+	return needsMap;
 }

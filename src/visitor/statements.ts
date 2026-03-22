@@ -3,6 +3,17 @@ import { makeNonShadowingName, registerIdentifierAlias, TranspilerContext, Visit
 import { translateExpression } from "./expressions";
 import { emitConsolePrint } from "./mappings/console";
 import { mapType, normalizeLiteralType } from "../types";
+import { isExpressionOriginallyOptional, isRecursiveClassType } from "./utils";
+
+const MUTATING_METHODS = new Set(["push", "set", "add", "insert", "delete"]);
+
+function isOptionalTypeString(typeStr: string): boolean {
+	return typeStr.includes("null") || typeStr.includes("undefined") || typeStr.startsWith("?") || typeStr.includes("|");
+}
+
+function isAnyLikeType(typeStr: string): boolean {
+	return typeStr === "any" || typeStr === "unknown";
+}
 
 export function processVariableStatement(node: ts.VariableStatement, context: TranspilerContext, visit: Visitor) {
 	const { sourceFile, checker } = context;
@@ -18,9 +29,17 @@ export function processVariableStatement(node: ts.VariableStatement, context: Tr
 		const type = checker.getTypeAtLocation(declaration);
 		const typeStr = checker.typeToString(type);
 		const rawZigType = mapType(typeStr, context.typeAliases);
-		const zigType = normalizeLiteralType(rawZigType);
+		let zigType = normalizeLiteralType(rawZigType);
+		if (isRecursiveClassType(type, checker)) {
+			if (zigType.startsWith("?")) {
+				zigType = `?*${zigType.slice(1)}`;
+			} else if (!zigType.startsWith("*")) {
+				zigType = `*${zigType}`;
+			}
+		}
 		const isGlobal = node.parent === sourceFile;
 		const isConst = (node.declarationList.flags & ts.NodeFlags.Const) !== 0;
+		const isMutated = isVariableMutatedAfterDeclaration(node, originalName);
 		const isNew = !!(declaration.initializer && ts.isNewExpression(declaration.initializer));
 		const isCompileTimeInit = !!declaration.initializer && (
 			ts.isLiteralExpression(declaration.initializer)
@@ -37,11 +56,20 @@ export function processVariableStatement(node: ts.VariableStatement, context: Tr
 		}
 
 		const keyword = isGlobal
-			? (isConst && isCompileTimeInit && !isNew ? "const" : "var")
-			: (isConst && !zigType.startsWith("[]") ? "const" : "var");
+			? (isConst && isCompileTimeInit && !isNew && !zigType.startsWith("[]") ? "const" : "var")
+			: (isConst && (!zigType.startsWith("[]") || !isMutated) ? "const" : "var");
 
 		const typeAnnotation = zigType === "anytype" ? "" : `: ${zigType}`;
-		const initText = declaration.initializer ? translateExpression(declaration.initializer, context) : "undefined";
+		let initText = declaration.initializer ? translateExpression(declaration.initializer, context) : "undefined";
+		const declarationIsOptional = isOptionalTypeString(typeStr);
+		if (
+			declaration.initializer
+			&& !declarationIsOptional
+			&& isExpressionOriginallyOptional(declaration.initializer, checker)
+			&& !initText.endsWith(".?")
+		) {
+			initText = `${initText}.?`;
+		}
 
 		if (!isGlobal && emittedName !== originalName) {
 			registerIdentifierAlias(context, originalName, emittedName);
@@ -58,6 +86,63 @@ export function processVariableStatement(node: ts.VariableStatement, context: Tr
 			context.mainBody += `    ${keyword} ${emittedName}${typeAnnotation} = ${initText};\n`;
 		}
 	});
+}
+
+function isVariableMutatedAfterDeclaration(node: ts.VariableStatement, variableName: string): boolean {
+	const parent = node.parent;
+	if (!parent || !("statements" in parent)) return false;
+	const statements = (parent as ts.Block | ts.SourceFile).statements;
+	const start = statements.findIndex((s) => s === node);
+	if (start < 0) return false;
+
+	const isMutatingNode = (n: ts.Node): boolean => {
+		if (ts.isBinaryExpression(n) && isMutationOperator(n.operatorToken.kind)) {
+			if (ts.isIdentifier(n.left) && n.left.text === variableName) return true;
+		}
+
+		if (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) {
+			if ((n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) && ts.isIdentifier(n.operand) && n.operand.text === variableName) {
+				return true;
+			}
+		}
+
+		if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+			const target = n.expression.expression;
+			const method = n.expression.name.text;
+			if (
+				ts.isIdentifier(target)
+				&& target.text === variableName
+				&& MUTATING_METHODS.has(method)
+			) {
+				return true;
+			}
+		}
+
+		let found = false;
+		ts.forEachChild(n, (c) => {
+			if (!found && isMutatingNode(c)) {
+				found = true;
+			}
+		});
+		return found;
+	};
+
+	for (let i = start + 1; i < statements.length; i++) {
+		if (isMutatingNode(statements[i])) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+function isMutationOperator(kind: ts.SyntaxKind): boolean {
+	return kind === ts.SyntaxKind.EqualsToken
+		|| kind === ts.SyntaxKind.PlusEqualsToken
+		|| kind === ts.SyntaxKind.MinusEqualsToken
+		|| kind === ts.SyntaxKind.AsteriskEqualsToken
+		|| kind === ts.SyntaxKind.SlashEqualsToken
+		|| kind === ts.SyntaxKind.PercentEqualsToken;
 }
 
 function processFunctionVariable(
@@ -121,15 +206,42 @@ export function processExpressionStatement(node: ts.ExpressionStatement, context
 		return;
 	}
 
+	if (
+		ts.isBinaryExpression(expression)
+		&& expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+		&& ts.isPropertyAccessExpression(expression.left)
+	) {
+		const baseType = checker.getTypeAtLocation(expression.left.expression);
+		const baseTypeStr = checker.typeToString(baseType);
+		if (isAnyLikeType(baseTypeStr)) {
+			return;
+		}
+	}
+
 	if (ts.isCallExpression(expression)) {
 		if (ts.isPropertyAccessExpression(expression.expression) && expression.expression.name.text === "push") {
-			const targetExpr = translateExpression(expression.expression.expression, context);
+			const targetNode = expression.expression.expression;
+			const targetExpr = translateExpression(targetNode, context);
 			const valueExpr = expression.arguments[0] ? translateExpression(expression.arguments[0], context) : "undefined";
 			const targetType = checker.getTypeAtLocation(expression.expression.expression);
 			const targetTypeStr = checker.typeToString(targetType);
 			const elemTsType = targetTypeStr.endsWith("[]") ? targetTypeStr.slice(0, -2) : "any";
 			const elemZigType = mapType(elemTsType, context.typeAliases);
 			context.mainBody += `    ${targetExpr} = __slicePush(${elemZigType}, ${targetExpr}, ${valueExpr});\n`;
+
+			if (ts.isIdentifier(targetNode)) {
+				const symbol = checker.getSymbolAtLocation(targetNode);
+				const decl = symbol?.valueDeclaration;
+				const getCall = decl && ts.isVariableDeclaration(decl) && decl.initializer
+					? getMapGetCall(decl.initializer)
+					: null;
+				if (getCall && getCall.arguments.length > 0) {
+					const getTarget = getCall.expression as ts.PropertyAccessExpression;
+					const mapExpr = translateExpression(getTarget.expression, context);
+					const keyExpr = translateExpression(getCall.arguments[0], context);
+					context.mainBody += `    _ = ${mapExpr}.set(${keyExpr}, ${targetExpr});\n`;
+				}
+			}
 			return;
 		}
 
@@ -150,6 +262,25 @@ export function processExpressionStatement(node: ts.ExpressionStatement, context
 	}
 
 	context.mainBody += `    ${translateExpression(expression, context)};\n`;
+}
+
+function getMapGetCall(expr: ts.Expression): ts.CallExpression | null {
+	let current: ts.Expression = expr;
+	while (
+		ts.isNonNullExpression(current)
+		|| ts.isParenthesizedExpression(current)
+		|| ts.isAsExpression(current)
+		|| ts.isTypeAssertionExpression(current)
+	) {
+		current = current.expression;
+	}
+	if (!ts.isCallExpression(current) || !ts.isPropertyAccessExpression(current.expression)) {
+		return null;
+	}
+	if (current.expression.name.text !== "get") {
+		return null;
+	}
+	return current;
 }
 
 export function processReturnStatement(node: ts.ReturnStatement, context: TranspilerContext) {

@@ -1,6 +1,7 @@
 import * as ts from "typescript";
 import { TranspilerContext, Visitor } from "../context";
 import { translateExpression } from "../expressions";
+import { isExpressionOriginallyOptional } from "../utils";
 
 export function processForStatement(node: ts.ForStatement, context: TranspilerContext, visit: Visitor) {
 	if (node.initializer && ts.isVariableDeclarationList(node.initializer)) {
@@ -43,15 +44,29 @@ export function processDoStatement(node: ts.DoStatement, context: TranspilerCont
 }
 
 export function processForOfStatement(node: ts.ForOfStatement, context: TranspilerContext, visit: Visitor) {
+	const { checker } = context;
 	const expression = translateExpression(node.expression, context);
+	const expressionType = checker.getTypeAtLocation(node.expression);
+	const expressionTypeStr = checker.typeToString(expressionType);
+	const isOptional = expressionTypeStr.includes("null") || expressionTypeStr.includes("undefined") || expressionTypeStr.startsWith("?") || expressionTypeStr.includes("|") || isExpressionOriginallyOptional(node.expression, checker);
 	let varName = "item";
 	if (ts.isVariableDeclarationList(node.initializer)) {
 		varName = node.initializer.declarations[0].name.getText();
 	}
-	context.mainBody += `    for (${expression}) |${varName}| {\n`;
+	if (isOptional) {
+		context.mainBody += `    if (${expression}) |__for_of_iter| {\n`;
+		context.mainBody += `        for (__for_of_iter) |${varName}| {\n`;
+	} else {
+		context.mainBody += `    for (${expression}) |${varName}| {\n`;
+	}
 	const originalMain = context.mainBody;
 	context.mainBody = "";
 	visit(node.statement);
-	const body = context.mainBody.split("\n").filter(l => l.trim()).map(l => "        " + l.trim()).join("\n");
-	context.mainBody = originalMain + body + "\n    }\n";
+	const bodyIndent = isOptional ? "            " : "        ";
+	const body = context.mainBody.split("\n").filter(l => l.trim()).map(l => bodyIndent + l.trim()).join("\n");
+	if (isOptional) {
+		context.mainBody = originalMain + body + "\n        }\n    }\n";
+	} else {
+		context.mainBody = originalMain + body + "\n    }\n";
+	}
 }

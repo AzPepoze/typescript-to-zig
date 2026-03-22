@@ -8,7 +8,15 @@ import {
 	Visitor,
 } from "../context";
 import { translateExpression } from "../expressions";
+import { isRecursiveClassType } from "../utils";
 import { mapType } from "../../types";
+
+const HASHMAP_ENTRY_TYPE_ALIASES = [
+	"{ key: K; value: V; }",
+	"{ key: K; value: V }",
+	"{key: K; value: V;}",
+	"{key: K; value: V}",
+];
 
 export function processClassDeclaration(node: ts.ClassDeclaration, context: TranspilerContext, visit: Visitor) {
 	const { checker } = context;
@@ -31,13 +39,26 @@ export function processClassDeclaration(node: ts.ClassDeclaration, context: Tran
 	const indent = isGeneric ? "        " : "    ";
 	const tpNames = isGeneric ? node.typeParameters!.map(p => p.name.text).join(", ") : "";
 	const selfType = isGeneric ? `${node.name.text}(${tpNames})` : node.name.text;
-
+	if (node.name.text === "HashMap" && isGeneric) {
+		context.zigOutput += `${indent}const Entry = struct { key: K, value: V };\n`;
+		for (const key of HASHMAP_ENTRY_TYPE_ALIASES) {
+			context.typeAliases.set(key, "Entry");
+		}
+	}
 	node.members.forEach(member => {
 		if (ts.isPropertyDeclaration(member) && ts.isIdentifier(member.name)) {
 			const type = checker.getTypeAtLocation(member);
 			const typeStr = checker.typeToString(type);
-			const init = member.initializer ? translateExpression(member.initializer, context) : "undefined";
+			let init = member.initializer ? translateExpression(member.initializer, context) : "undefined";
 			let mappedType = mapType(typeStr, context.typeAliases);
+			if (node.name?.text === "HashMap" && member.name.text === "table" && mappedType.startsWith("Map(")) {
+				mappedType = mappedType.replace(/^Map\([^,]+,\s*/, "Map(f64, ");
+				mappedType = mappedType.replace(/\[\]struct\s*\{\s*key:\s*K\s*,\s*value:\s*V\s*\}/g, "[]Entry");
+				if (member.initializer && ts.isNewExpression(member.initializer)) {
+					init = `${mappedType}{}`;
+				}
+			}
+			mappedType = pointerizeClassType(mappedType, type, checker);
 			const selfTypeName = node.name?.text;
 			if (selfTypeName) {
 				if (mappedType === selfTypeName || mappedType.startsWith(`${selfTypeName}(`)) {
@@ -79,10 +100,12 @@ export function processClassDeclaration(node: ts.ClassDeclaration, context: Tran
 				} else {
 					zigType = mapType(pTypeStr, context.typeAliases);
 				}
+				zigType = pointerizeClassType(zigType, pType, checker);
 				return `${emittedName}: ${zigType}`;
 			}).join(", ");
 			const allParams = [selfParam, extraParams].filter(Boolean).join(", ");
-			context.zigOutput += `${indent}pub fn ${member.name.text}(${allParams}) ${mapType(returnTypeStr, context.typeAliases)} {\n`;
+			const zigReturnType = pointerizeClassType(mapType(returnTypeStr, context.typeAliases), returnType, checker);
+			context.zigOutput += `${indent}pub fn ${member.name.text}(${allParams}) ${zigReturnType} {\n`;
 			if (member.body && member.body.statements.length > 0) {
 				const originalMain = context.mainBody;
 				context.mainBody = "";
@@ -121,6 +144,22 @@ export function processClassDeclaration(node: ts.ClassDeclaration, context: Tran
 	if (isDefault) {
 		context.zigOutput += `pub const Default = ${node.name.text};\n\n`;
 	}
+}
+
+function pointerizeClassType(mappedType: string, type: ts.Type, checker: ts.TypeChecker): string {
+	if (!isRecursiveClassType(type, checker)) {
+		return mappedType;
+	}
+	if (mappedType.startsWith("?*")) {
+		return mappedType;
+	}
+	if (mappedType.startsWith("?")) {
+		return `?*${mappedType.slice(1)}`;
+	}
+	if (mappedType.startsWith("*")) {
+		return mappedType;
+	}
+	return `*${mappedType}`;
 }
 
 function methodMutatesSelf(member: ts.MethodDeclaration): boolean {

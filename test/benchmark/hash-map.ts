@@ -3,7 +3,7 @@
  */
 
 export class HashMap<K extends string | number, V> {
-	private table: Map<K, V[]> = new Map();
+	private table: Map<number, Array<{ key: K; value: V }>> = new Map();
 	private capacity: number = 16;
 
 	set(key: K, value: V): void {
@@ -13,12 +13,12 @@ export class HashMap<K extends string | number, V> {
 		}
 		const bucket = this.table.get(index)!;
 		for (let i = 0; i < bucket.length; i++) {
-			if ((bucket[i] as any).key === key) {
-				(bucket[i] as any).value = value;
+			if (bucket[i].key === key) {
+				bucket[i].value = value;
 				return;
 			}
 		}
-		bucket.push(value);
+		bucket.push({ key, value });
 	}
 
 	get(key: K): V | undefined {
@@ -26,8 +26,8 @@ export class HashMap<K extends string | number, V> {
 		const bucket = this.table.get(index);
 		if (bucket) {
 			for (const item of bucket) {
-				if ((item as any).key === key) {
-					return item;
+				if (item.key === key) {
+					return item.value;
 				}
 			}
 		}
