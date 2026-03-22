@@ -9,6 +9,20 @@ export function translateCallExpression(node: ts.CallExpression, context: Transp
 	let func = translateExpression(node.expression, context);
 	let args = node.arguments.map(arg => translateExpression(arg, context));
 
+	if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)) {
+		const objectName = node.expression.expression.text;
+		const objectSymbol = checker.getSymbolAtLocation(node.expression.expression);
+		const objectDecl = objectSymbol?.valueDeclaration;
+		if (
+			objectDecl
+			&& ts.isVariableDeclaration(objectDecl)
+			&& ts.isVariableDeclarationList(objectDecl.parent)
+			&& (objectDecl.parent.flags & ts.NodeFlags.Const) !== 0
+		) {
+			func = `@constCast(&${objectName}).${node.expression.name.text}`;
+		}
+	}
+
 	const mathResult = handleMathCall(func, node, args, context);
 	if (mathResult) return mathResult;
 
@@ -16,6 +30,18 @@ export function translateCallExpression(node: ts.CallExpression, context: Transp
 	if (parseIntResult) return parseIntResult;
 
 	if (func === "parseFloat") return `std.fmt.parseFloat(f64, ${args[0]}) catch 0.0`;
+	if (func === "String") {
+		return `std.fmt.allocPrint(std.heap.page_allocator, "{any}", .{ ${args[0] ?? ""} }) catch ""`;
+	}
+	if (func.endsWith(".charCodeAt")) {
+		const obj = func.slice(0, -".charCodeAt".length);
+		const idx = args[0] ?? "0";
+		return `@as(f64, @floatFromInt(${obj}[@as(usize, @intFromFloat(${idx}))]))`;
+	}
+	if (func.endsWith(".toString")) {
+		const obj = func.slice(0, -".toString".length);
+		return `std.fmt.allocPrint(std.heap.page_allocator, "{any}", .{ ${obj} }) catch ""`;
+	}
 
 	const signature = checker.getResolvedSignature(node);
 	if (signature) {
@@ -74,11 +100,21 @@ export function translateNewExpression(node: ts.NewExpression, context: Transpil
 	const { checker } = context;
 	const type = checker.getTypeAtLocation(node);
 	const typeStr = checker.typeToString(type);
+	const contextualType = checker.getContextualType(node);
+	const contextualTypeStr = contextualType ? checker.typeToString(contextualType) : "";
 	let zigType = translateExpression(node.expression, context);
 
 	if (node.typeArguments && node.typeArguments.length > 0) {
 		const args = node.typeArguments.map(arg => mapType(checker.typeToString(checker.getTypeFromTypeNode(arg)), context.typeAliases)).join(", ");
 		zigType = `${zigType}(${args})`;
+	} else if (
+		ts.isIdentifier(node.expression)
+		&& node.expression.text === "Map"
+		&& contextualTypeStr.includes("<")
+	) {
+		zigType = mapType(contextualTypeStr, context.typeAliases);
+	} else if (ts.isIdentifier(node.expression) && typeStr.includes("<")) {
+		zigType = mapType(typeStr, context.typeAliases);
 	} else if (!ts.isIdentifier(node.expression)) {
 		zigType = mapType(typeStr, context.typeAliases);
 	}

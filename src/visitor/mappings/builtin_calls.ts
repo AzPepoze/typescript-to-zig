@@ -15,6 +15,8 @@ export function handleMathCall(func: string, node: ts.CallExpression, args: stri
 	if (func === "Math.floor") return `std.math.floor(${args[0]})`;
 	if (func === "Math.ceil") return `std.math.ceil(${args[0]})`;
 	if (func === "Math.round") return `std.math.round(${args[0]})`;
+	if (func === "Math.max") return `@max(${args[0]}, ${args[1] ?? args[0]})`;
+	if (func === "Math.min") return `@min(${args[0]}, ${args[1] ?? args[0]})`;
 	return null;
 }
 

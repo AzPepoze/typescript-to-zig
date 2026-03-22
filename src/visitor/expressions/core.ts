@@ -19,12 +19,15 @@ export function translateExpression(node: ts.Node, context: TranspilerContext): 
 	if (ts.isStringLiteral(node)) return `"${node.text}"`;
 	if (ts.isBigIntLiteral(node)) return node.text.replace(/n$/, "");
 	if (ts.isNoSubstitutionTemplateLiteral(node)) return `"${node.text}"`;
+	if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) {
+		return translateExpression(node.expression, context);
+	}
 	if (ts.isTemplateExpression(node)) return translateTemplateLiteral(node, context);
 
 	if (ts.isArrayLiteralExpression(node)) {
 		const elements = node.elements.map((element: ts.Expression) => translateExpression(element, context));
 		const contextualType = checker.getContextualType(node);
-		const typeStr = contextualType ? checker.typeToString(contextualType) : "";
+		const typeStr = contextualType ? checker.typeToString(contextualType) : checker.typeToString(checker.getTypeAtLocation(node));
 		const isSlice = typeStr.includes("[]") || typeStr.includes("Array");
 		if (isSlice) {
 			const zigSliceType = mapType(typeStr, context.typeAliases);
@@ -51,6 +54,7 @@ export function translateExpression(node: ts.Node, context: TranspilerContext): 
 		const object = translateExpression(node.expression, context);
 		const propertyName = node.name.text;
 		if (object === "this") return `self.${propertyName}`;
+		if (propertyName === "length") return `@as(f64, @floatFromInt(${object}.len))`;
 		return `${object}.${propertyName}`;
 	}
 
@@ -72,7 +76,13 @@ export function translateExpression(node: ts.Node, context: TranspilerContext): 
 	if (ts.isBinaryExpression(node)) return translateBinaryExpression(node, context);
 
 	if (ts.isNonNullExpression(node)) {
-		return translateExpression(node.expression, context);
+		const inner = translateExpression(node.expression, context);
+		const innerType = checker.getTypeAtLocation(node.expression);
+		const innerTypeStr = checker.typeToString(innerType);
+		if (innerTypeStr.includes("null") || innerTypeStr.includes("undefined") || innerTypeStr.startsWith("?")) {
+			return `${inner} orelse unreachable`;
+		}
+		return inner;
 	}
 
 	if (ts.isPrefixUnaryExpression(node)) {

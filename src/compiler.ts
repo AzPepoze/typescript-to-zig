@@ -26,7 +26,8 @@ export function runTranspiler(testDir: string, outDir: string) {
 
 		const baseName = path.basename(file, ".ts");
 		const context: TranspilerContext = {
-			zigOutput: `// Generated from ${file}\nconst std = @import("std");\n\n`,
+			zigOutput: `// Generated from ${file}\nconst std = @import("std");\n\nfn __mapKeyEquals(comptime K: type, a: K, b: K) bool {\n    const info = @typeInfo(K);\n    if (info == .pointer and info.pointer.size == .slice and info.pointer.child == u8) {\n        return std.mem.eql(u8, a, b);\n    }\n    return a == b;\n}\n\nfn Map(comptime K: type, comptime V: type) type {\n    return struct {\n        keys: [1024]K = undefined,\n        vals: [1024]V = undefined,\n        len: usize = 0,\n\n        pub fn has(self: *const @This(), key: K) bool {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) return true;\n            }\n            return false;\n        }\n\n        pub fn get(self: *const @This(), key: K) ?V {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) return self.vals[i];\n            }\n            return null;\n        }\n\n        pub fn set(self: *@This(), key: K, value: V) bool {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) {\n                    self.vals[i] = value;\n                    return true;\n                }\n            }\n            if (self.len >= self.keys.len) return false;\n            self.keys[self.len] = key;\n            self.vals[self.len] = value;\n            self.len += 1;\n            return true;\n        }\n\n        pub fn values(self: *const @This()) []const V {\n            return self.vals[0..self.len];\n        }\n    };\n}\n\n`,
+			zigOutput: `// Generated from ${file}\nconst std = @import("std");\n\nfn __mapKeyEquals(comptime K: type, a: K, b: K) bool {\n    const info = @typeInfo(K);\n    if (info == .pointer and info.pointer.size == .slice and info.pointer.child == u8) {\n        return std.mem.eql(u8, a, b);\n    }\n    return a == b;\n}\n\nfn __slicePush(comptime T: type, src: []T, value: T) []T {\n    const out = std.heap.page_allocator.alloc(T, src.len + 1) catch return src;\n    std.mem.copyForwards(T, out[0..src.len], src);\n    out[src.len] = value;\n    return out;\n}\n\nfn Map(comptime K: type, comptime V: type) type {\n    return struct {\n        keys: [1024]K = undefined,\n        vals: [1024]V = undefined,\n        len: usize = 0,\n\n        pub fn has(self: *const @This(), key: K) bool {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) return true;\n            }\n            return false;\n        }\n\n        pub fn get(self: *const @This(), key: K) ?V {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) return self.vals[i];\n            }\n            return null;\n        }\n\n        pub fn set(self: *@This(), key: K, value: V) bool {\n            var i: usize = 0;\n            while (i < self.len) : (i += 1) {\n                if (__mapKeyEquals(K, self.keys[i], key)) {\n                    self.vals[i] = value;\n                    return true;\n                }\n            }\n            if (self.len >= self.keys.len) return false;\n            self.keys[self.len] = key;\n            self.vals[self.len] = value;\n            self.len += 1;\n            return true;\n        }\n\n        pub fn values(self: *const @This()) []const V {\n            return self.vals[0..self.len];\n        }\n    };\n}\n\n`,
 			mainBody: "",
 			sourceFile,
 			checker,
@@ -46,22 +47,35 @@ export function runTranspiler(testDir: string, outDir: string) {
 			});
 		});
 
+		sourceFile.statements.forEach(stmt => {
+			if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+				context.globalNames.add(stmt.name.text);
+			}
+			if (ts.isClassDeclaration(stmt)) {
+				stmt.members.forEach(member => {
+					if ((ts.isMethodDeclaration(member) || ts.isPropertyDeclaration(member)) && member.name && ts.isIdentifier(member.name)) {
+						context.globalNames.add(member.name.text);
+					}
+				});
+			}
+		});
+
 		const visit = createVisitor(context);
 		ts.forEachChild(sourceFile, visit);
 
-		const initCalls = context.importAliases.map(alias => `    if (@hasDecl(${alias}, "_init")) try ${alias}._init();`).join("\n");
+		const initCalls = context.importAliases.map(alias => `    if (@hasDecl(${alias}, "_init")) ${alias}._init();`).join("\n");
 		const initBody = context.mainBody;
 
 		context.zigOutput += `
 pub var _is_initialized = false;
-pub fn _init() !void {
+pub fn _init() void {
     if (_is_initialized) return;
     _is_initialized = true;
 ${initCalls}
 ${initBody}}
 
-pub fn main() !void {
-    try _init();
+pub fn main() void {
+    _init();
 }
 `;
 

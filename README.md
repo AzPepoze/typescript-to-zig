@@ -1,15 +1,37 @@
 # typescript-to-zig
 
-To install dependencies:
+A TypeScript to Zig transpiler. This project is in early development and may not support all TypeScript features yet.
+
+## Prerequisites
+
+- [Bun](https://bun.sh/) (for running the transpiler and tests)
+- [Zig](https://ziglang.org/) (for compiling the generated Zig code)
+- [Node.js](https://nodejs.org/) (for running the tests for comparison)
+
+## Usage
+
+### Install dependencies
 
 ```bash
 bun install
 ```
 
-To run:
+### Transpile a TypeScript file
 
 ```bash
-bun run index.ts
+bun run transpile -- src/example.ts src/example.zig
 ```
 
-This project was created using `bun init` in bun v1.3.10. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+## Test
+
+### Test the transpiler
+
+```bash
+bun run test
+```
+
+### Test the benchmark
+
+```bash
+bun run benchmark
+```

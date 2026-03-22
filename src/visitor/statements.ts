@@ -22,6 +22,12 @@ export function processVariableStatement(node: ts.VariableStatement, context: Tr
 		const isGlobal = node.parent === sourceFile;
 		const isConst = (node.declarationList.flags & ts.NodeFlags.Const) !== 0;
 		const isNew = !!(declaration.initializer && ts.isNewExpression(declaration.initializer));
+		const isCompileTimeInit = !!declaration.initializer && (
+			ts.isLiteralExpression(declaration.initializer)
+			|| ts.isNoSubstitutionTemplateLiteral(declaration.initializer)
+			|| ts.isArrayLiteralExpression(declaration.initializer)
+			|| ts.isObjectLiteralExpression(declaration.initializer)
+		);
 
 		let emittedName = originalName;
 		if (isGlobal) {
@@ -31,8 +37,8 @@ export function processVariableStatement(node: ts.VariableStatement, context: Tr
 		}
 
 		const keyword = isGlobal
-			? (isNew ? "var" : (isConst ? "const" : "var"))
-			: (isConst ? "const" : "var");
+			? (isConst && isCompileTimeInit && !isNew ? "const" : "var")
+			: (isConst && !zigType.startsWith("[]") ? "const" : "var");
 
 		const typeAnnotation = zigType === "anytype" ? "" : `: ${zigType}`;
 		const initText = declaration.initializer ? translateExpression(declaration.initializer, context) : "undefined";
@@ -42,7 +48,12 @@ export function processVariableStatement(node: ts.VariableStatement, context: Tr
 		}
 
 		if (isGlobal) {
-			context.zigOutput += `pub ${keyword} ${emittedName}${typeAnnotation} = ${initText};\n`;
+			if (keyword === "var" && declaration.initializer && !isCompileTimeInit) {
+				context.zigOutput += `pub var ${emittedName}${typeAnnotation} = undefined;\n`;
+				context.mainBody += `    ${emittedName} = ${initText};\n`;
+			} else {
+				context.zigOutput += `pub ${keyword} ${emittedName}${typeAnnotation} = ${initText};\n`;
+			}
 		} else {
 			context.mainBody += `    ${keyword} ${emittedName}${typeAnnotation} = ${initText};\n`;
 		}
@@ -91,7 +102,37 @@ export function processExpressionStatement(node: ts.ExpressionStatement, context
 	const { checker } = context;
 	const expression = node.expression;
 
+	if (
+		ts.isBinaryExpression(expression)
+		&& expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+		&& ts.isArrayLiteralExpression(expression.left)
+		&& ts.isArrayLiteralExpression(expression.right)
+		&& expression.left.elements.length === 2
+		&& expression.right.elements.length === 2
+	) {
+		const left0 = translateExpression(expression.left.elements[0], context);
+		const left1 = translateExpression(expression.left.elements[1], context);
+		const right0 = translateExpression(expression.right.elements[0], context);
+		const right1 = translateExpression(expression.right.elements[1], context);
+		context.mainBody += `    const __destructure_tmp0 = ${right0};\n`;
+		context.mainBody += `    const __destructure_tmp1 = ${right1};\n`;
+		context.mainBody += `    ${left0} = __destructure_tmp0;\n`;
+		context.mainBody += `    ${left1} = __destructure_tmp1;\n`;
+		return;
+	}
+
 	if (ts.isCallExpression(expression)) {
+		if (ts.isPropertyAccessExpression(expression.expression) && expression.expression.name.text === "push") {
+			const targetExpr = translateExpression(expression.expression.expression, context);
+			const valueExpr = expression.arguments[0] ? translateExpression(expression.arguments[0], context) : "undefined";
+			const targetType = checker.getTypeAtLocation(expression.expression.expression);
+			const targetTypeStr = checker.typeToString(targetType);
+			const elemTsType = targetTypeStr.endsWith("[]") ? targetTypeStr.slice(0, -2) : "any";
+			const elemZigType = mapType(elemTsType, context.typeAliases);
+			context.mainBody += `    ${targetExpr} = __slicePush(${elemZigType}, ${targetExpr}, ${valueExpr});\n`;
+			return;
+		}
+
 		const callText = expression.expression.getText(context.sourceFile);
 		if (callText === "console.log") {
 			emitConsolePrint(expression.arguments, context);

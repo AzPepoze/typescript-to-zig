@@ -37,7 +37,16 @@ export function processClassDeclaration(node: ts.ClassDeclaration, context: Tran
 			const type = checker.getTypeAtLocation(member);
 			const typeStr = checker.typeToString(type);
 			const init = member.initializer ? translateExpression(member.initializer, context) : "undefined";
-			context.zigOutput += `${indent}${member.name.text}: ${mapType(typeStr, context.typeAliases)} = ${init},\n`;
+			let mappedType = mapType(typeStr, context.typeAliases);
+			const selfTypeName = node.name?.text;
+			if (selfTypeName) {
+				if (mappedType === selfTypeName || mappedType.startsWith(`${selfTypeName}(`)) {
+					mappedType = `*${mappedType}`;
+				} else if (mappedType.startsWith(`?${selfTypeName}(`)) {
+					mappedType = `?*${mappedType.slice(1)}`;
+				}
+			}
+			context.zigOutput += `${indent}${member.name.text}: ${mappedType} = ${init},\n`;
 		}
 	});
 
@@ -120,6 +129,17 @@ function methodMutatesSelf(member: ts.MethodDeclaration): boolean {
 
 	const visitNode = (n: ts.Node) => {
 		if (mutates) return;
+
+		if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+			const methodName = n.expression.name.text;
+			if (
+				isAccessOnThis(n.expression.expression)
+				&& (methodName === "set" || methodName === "push" || methodName === "add" || methodName === "insert" || methodName === "delete")
+			) {
+				mutates = true;
+				return;
+			}
+		}
 
 		if (ts.isBinaryExpression(n) && isMutationOperator(n.operatorToken.kind)) {
 			if (isAccessOnThis(n.left)) {
