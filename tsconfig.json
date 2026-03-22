@@ -1,0 +1,14 @@
+{
+	"compilerOptions": {
+		"target": "ESNext",
+		"module": "ESNext",
+		"strict": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"noImplicitAny": true,
+		"noEmit": true,
+		"rootDir": ".",
+		"types": ["bun-types"]
+	},
+	"include": ["**/*.ts"]
+}
